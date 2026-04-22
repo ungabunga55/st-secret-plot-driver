@@ -45,17 +45,25 @@ user hits send
      │        │
      │        └── Secret Plot Driver hook (this extension, makeFirst)
      │                 │
-     │                 ├── build prompt:
-     │                 │     <secret_plot_state> { previous state JSON } </secret_plot_state>
-     │                 │     <agent_task>
-     │                 │       ... Marinara's full "Narrative Architect" prompt ...
-     │                 │     </agent_task>
+     │                 ├── capture pending user text from #send_textarea
+     │                 │     (it hasn't been pushed into chat[] yet at this point)
      │                 │
-     │                 ├── generateQuietPrompt(quietPrompt, skipWIAN=false)
-     │                 │     → goes through the full ST prompt pipeline:
-     │                 │       persona, char card, WI, author's note, chat history
+     │                 ├── build message array:
+     │                 │     system  — "You are a backend analysis agent, NOT a
+     │                 │               roleplay character…"
+     │                 │     user    — <recent_roleplay_transcript> header
+     │                 │     user/assistant — last N chat messages (full text)
+     │                 │     user    — the pending message (just captured)
+     │                 │     user    — <secret_plot_state> + <agent_instructions>
+     │                 │               + "Respond with JSON ONLY"
      │                 │
-     │                 ├── parse JSON { overarchingArc, sceneDirections, pacing, staleDetected }
+     │                 ├── generateRaw(prompt: messages)
+     │                 │     → standalone LLM call with our own message array
+     │                 │       (no persona/char card/WI — just chat history +
+     │                 │       the agent task, sent as role: user)
+     │                 │
+     │                 ├── parse JSON { overarchingArc, sceneDirections, pacing,
+     │                 │                staleDetected }
      │                 ├── persist to chat_metadata.secret_plot_driver
      │                 │     · overarchingArc (kept until completed)
      │                 │     · sceneDirections (unfulfilled only)
@@ -63,8 +71,9 @@ user hits send
      │                 │     · pacing / staleDetected
      │                 │
      │                 └── setExtensionPrompt:
-     │                       · ARC   → IN_PROMPT (after story string) as SYSTEM
-     │                       · DIR   → IN_CHAT at depth 0 as SYSTEM
+     │                       · ARC   → IN_PROMPT (after story string)
+     │                       · DIR   → IN_CHAT at depth 0
+     │                       (role for each is configurable: system/user/assistant)
      │
      ├── other extensions (Stepped Thinking, etc.) run here
      │       → their quiet generations automatically see the arc/directions
@@ -73,12 +82,11 @@ user hits send
      └── main generation runs with arc + directions baked into the prompt
 ```
 
-The full Marinara prompt is preserved verbatim in `index.js`
-(`DEFAULT_PROMPT_TEMPLATE`). State persistence rules match
-Marinara's `generate.routes.ts` — arc survives until completed, scene
-directions are kept only while unfulfilled, fulfilled directions roll
-into a 10-entry "recentlyFulfilled" window so the agent doesn't
-re-issue them.
+The agent prompt (`DEFAULT_PROMPT_TEMPLATE` in `index.js`) defines the
+full "Narrative Architect" role. State persistence rules: arc survives
+until completed, scene directions are kept only while unfulfilled,
+fulfilled directions roll into a 10-entry "recentlyFulfilled" window
+so the agent doesn't re-issue them.
 
 ## Installation
 
@@ -133,14 +141,15 @@ All exposed in the drawer's *Advanced Settings* section:
 
 | Setting | Default | Notes |
 |---|---|---|
-| Run every N user messages | `1` | `1` = every turn (Marinara default). Higher values save tokens on long chats. |
+| Run every N user messages | `1` | `1` = every turn. Higher values save tokens on long chats. |
 | Chat context size | `10` messages | How many recent chat messages the agent sees as reference material. |
-| Agent response length | `2048` tokens | Max tokens for the JSON output. |
+| Per-message char cap | `0` (no truncation) | Max characters per chat message sent to the agent. `0` sends messages in full — recommended so the agent has complete context. Only set above 0 if you're hitting context-length errors. |
+| Agent response length | `2048` tokens | Max tokens for the agent's JSON output. |
 | Arc injection role / position / depth | `System` / `After Main Prompt` / `0` | Where the arc block goes in the **main** generation. Role is honored verbatim in the outgoing request — switch to `User` or `Assistant` if you want the arc sent as that role instead of `system`. |
 | Direction injection role / position / depth | `System` / `In-Chat` / `0` | Where the scene direction goes. `In-Chat @ depth 0` = right above the latest user message. Role is honored the same way as the arc. |
-| Arc injection template | `<overarching_arc>{{arc}}</overarching_arc>` | `{{arc}}` is replaced with the current arc. |
-| Direction injection template | `<scene_directions>{{directions}}</scene_directions>` | `{{directions}}` is replaced with a bullet list. |
-| Agent prompt template | full Marinara prompt | Editable. *Restore default* brings back the original verbatim Marinara prompt. |
+| Arc injection template | `<overarching_arc>{{arc}}</overarching_arc>` | `{{arc}}` is replaced with the current arc text. |
+| Direction injection template | `<scene_directions>{{directions}}</scene_directions>` | `{{directions}}` is replaced with a bullet list of active directions. |
+| Agent prompt template | full Narrative Architect prompt | Editable. *Restore default* brings back the original prompt. |
 
 ## Credits
 
