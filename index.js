@@ -302,9 +302,19 @@ function stripTags(text) {
 
 /**
  * Build recent chat history as user/assistant turns for the agent call.
- * Last `context_size` messages, HTML stripped, capped per-message to save tokens.
+ *
+ * Important timing note: when this runs from GENERATION_AFTER_COMMANDS,
+ * the user's *new* outgoing message has NOT yet been pushed into
+ * context.chat (SillyTavern pushes it a bit later in Generate(), after
+ * our hook returns). So we pull it from the #send_textarea and append
+ * it as a synthetic `user` message — otherwise the very first agent
+ * call on a fresh chat would only see the AI's intro card message and
+ * miss what the user is actually writing.
+ *
+ * Last `context_size` messages are used, HTML stripped, per-message
+ * length capped to save tokens.
  */
-function buildHistoryMessages() {
+function buildHistoryMessages(pendingUserText = '') {
     const context = getContext();
     const chat = Array.isArray(context.chat) ? context.chat : [];
     const n = Math.max(1, Number(settings.context_size) || 10);
@@ -323,6 +333,30 @@ function buildHistoryMessages() {
             messages.push({ role, content });
         }
     }
+
+    // Append the pending user message — the thing the user just typed but
+    // which SillyTavern's Generate() has NOT yet pushed into chat[] at the
+    // time our GENERATION_AFTER_COMMANDS hook fires. Without this, the
+    // agent never sees the user's newest message and drives the plot based
+    // on stale context.
+    //
+    // Skip if the last committed chat message is already a user message
+    // (e.g. regenerate/continue scenarios — nothing new was typed).
+    const lastMsg = chat[chat.length - 1];
+    const lastIsUser = !!(lastMsg && lastMsg.is_user);
+    const pending = String(pendingUserText ?? '').trim()
+        || (!lastIsUser ? String($('#send_textarea').val() ?? '').trim() : '');
+
+    if (pending && !lastIsUser) {
+        const content = stripTags(pending).slice(0, 2000);
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user') {
+            last.content = last.content + '\n\n' + content;
+        } else {
+            messages.push({ role: 'user', content });
+        }
+    }
+
     return messages;
 }
 
@@ -379,7 +413,7 @@ function buildAgentTaskMessage() {
  * the LLM out of "continue the roleplay" mode and into "answer a request"
  * mode, which was the cause of the agent replying as Seraphina before.
  */
-function buildAgentMessages() {
+function buildAgentMessages(pendingUserText = '') {
     const systemPrimer =
         "You are a backend analysis agent, NOT a roleplay character. " +
         "The chat history below is reference material for a narrative task you must analyze. " +
@@ -390,7 +424,7 @@ function buildAgentMessages() {
     const messages = [];
     messages.push({ role: 'system', content: systemPrimer });
 
-    const history = buildHistoryMessages();
+    const history = buildHistoryMessages(pendingUserText);
     if (history.length > 0) {
         // Prefix the first history entry so the model understands what it is
         messages.push({
@@ -420,7 +454,7 @@ function buildAgentMessages() {
  *   • recent chat history is included as plain user/assistant turns — this
  *     is all the context the agent needs to drive the plot.
  */
-async function runAgent({ force = false } = {}) {
+async function runAgent({ force = false, pendingUserText = '' } = {}) {
     if (isRunning) {
         console.log('[SPD] Already running — skipping re-entry');
         return null;
@@ -428,9 +462,19 @@ async function runAgent({ force = false } = {}) {
     if (!settings.is_enabled && !force) return null;
     if (settings.is_paused && !force) return null;
 
+    // If no pendingUserText was threaded in, try to read it from the
+    // textarea now as a last-resort fallback (covers /spd-style manual
+    // calls and the "Run now" button).
+    const effectivePending = String(pendingUserText ?? '').trim()
+        || String($('#send_textarea').val() ?? '').trim();
+
+    // Don't bail on empty chats — the user may be sending the very first
+    // message (which isn't in chat[] yet). Only bail if there's truly
+    // nothing to analyze at all.
     const context = getContext();
-    if (!context.chat || context.chat.length === 0) {
-        if (!force) return null;
+    const hasChatContent = Array.isArray(context.chat) && context.chat.length > 0;
+    if (!hasChatContent && !effectivePending && !force) {
+        return null;
     }
 
     isRunning = true;
@@ -442,7 +486,11 @@ async function runAgent({ force = false } = {}) {
             });
         }
 
-        const messages = buildAgentMessages();
+        if (settings.log_debug) {
+            console.log(`[SPD] Pending user text captured: ${effectivePending ? `"${effectivePending.slice(0, 120)}${effectivePending.length > 120 ? '…' : ''}"` : '(none)'}`);
+        }
+
+        const messages = buildAgentMessages(effectivePending);
         if (settings.log_debug) {
             console.log('[SPD] ── Agent message array ──');
             for (const m of messages) {
@@ -567,6 +615,16 @@ function isGenerationTypeAllowed(type) {
 async function onGenerationAfterCommands(type, _options, isDryRun) {
     if (isDryRun) return;
     if (!settings || !settings.is_enabled) return;
+
+    // ── CAPTURE the user's pending message NOW, before anything else
+    // ── (SillyTavern clears the textarea later in Generate(), line ~4319).
+    // ── This is what the user just typed and hasn't yet been committed
+    // ── to context.chat[].
+    let pendingUserText = '';
+    try {
+        pendingUserText = String($('#send_textarea').val() ?? '').trim();
+    } catch (_) { /* ignore */ }
+
     if (!isGenerationTypeAllowed(type)) {
         // On regens/swipes/continues, DON'T re-run — but ensure stored
         // state is re-injected so the arc/directions persist across swipes.
@@ -590,7 +648,7 @@ async function onGenerationAfterCommands(type, _options, isDryRun) {
         return;
     }
 
-    await runAgent();
+    await runAgent({ pendingUserText });
 }
 
 function onChatChanged() {
