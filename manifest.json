@@ -1,0 +1,12 @@
+{
+  "display_name": "Secret Plot Driver",
+  "loading_order": 1,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "ungabunga55",
+  "version": "1.0.0",
+  "homePage": "https://github.com/ungabunga55/st-secret-plot-driver",
+  "auto_update": false
+}

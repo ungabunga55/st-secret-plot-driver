@@ -1,0 +1,132 @@
+<div id="spd_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Secret Plot Driver</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="spd_description">
+                <small>
+                    A hidden Narrative Architect agent. Runs <b>before</b> every main generation,
+                    producing an overarching story arc and a single short scene direction that are
+                    injected into the main prompt. The user never sees the agent's reasoning — only
+                    its effects on the unfolding roleplay. State is stored per-chat.
+                </small>
+            </div>
+
+            <hr>
+
+            <div class="flex-container flexFlowColumn">
+                <label class="checkbox_label" for="spd_is_enabled">
+                    <input id="spd_is_enabled" type="checkbox" />
+                    <span>Enable Secret Plot Driver</span>
+                </label>
+                <label class="checkbox_label" for="spd_is_paused" title="Skip agent runs but keep existing arc/directions injected.">
+                    <input id="spd_is_paused" type="checkbox" />
+                    <span>Pause (freeze current arc/directions, don't re-run agent)</span>
+                </label>
+                <label class="checkbox_label" for="spd_show_toast" title="Show a toast while the agent is running.">
+                    <input id="spd_show_toast" type="checkbox" />
+                    <span>Show toast while agent runs</span>
+                </label>
+                <label class="checkbox_label" for="spd_log_debug" title="Log full prompt and raw response to the browser console.">
+                    <input id="spd_log_debug" type="checkbox" />
+                    <span>Debug logging (prompt &amp; response to console)</span>
+                </label>
+            </div>
+
+            <hr>
+
+            <h4>Current Overarching Arc</h4>
+            <textarea id="spd_current_arc" class="text_pole textarea_compact" rows="5"
+                placeholder="No arc yet. One will be generated on the next message." readonly></textarea>
+
+            <h4>Active Scene Direction</h4>
+            <textarea id="spd_current_directions" class="text_pole textarea_compact" rows="3"
+                placeholder="No active direction yet." readonly></textarea>
+
+            <div class="flex-container">
+                <div id="spd_reset_arc" class="menu_button menu_button_icon" title="Clear the stored arc/directions for this chat and force a fresh one next turn.">
+                    <i class="fa-solid fa-trash"></i>
+                    <span>Reset plot state (this chat)</span>
+                </div>
+                <div id="spd_run_now" class="menu_button menu_button_icon" title="Trigger the Secret Plot Driver agent right now without sending a message.">
+                    <i class="fa-solid fa-play"></i>
+                    <span>Run now</span>
+                </div>
+            </div>
+
+            <hr>
+
+            <div id="spd_advanced_toggle" class="menu_button menu_button_icon" title="Edit prompt template, model settings, injection positions.">
+                <i class="fa-solid fa-cog"></i>
+                <span>Advanced Settings</span>
+            </div>
+
+            <div id="spd_advanced_block" style="display:none;">
+                <label for="spd_run_interval" title="Run the agent every N user messages. 1 = every turn.">
+                    <span>Run every</span>
+                    <input id="spd_run_interval" type="number" min="1" max="50" step="1" class="text_pole widthUnset" />
+                    <span>user message(s)</span>
+                </label>
+
+                <label for="spd_context_size" title="How many recent chat messages the agent sees. Higher = better plot awareness, more tokens.">
+                    <span>Chat context size (last N messages)</span>
+                    <input id="spd_context_size" type="number" min="1" max="100" step="1" class="text_pole widthUnset" />
+                </label>
+
+                <label for="spd_response_length" title="Max tokens for the agent's JSON response (needs to fit the full JSON structure).">
+                    <span>Agent response length (tokens)</span>
+                </label>
+                <input id="spd_response_length" type="number" min="256" max="8192" step="128" class="text_pole" />
+
+                <label for="spd_arc_role">Inject arc as role:</label>
+                <select id="spd_arc_role" class="text_pole">
+                    <option value="0">System</option>
+                    <option value="1">User</option>
+                    <option value="2">Assistant</option>
+                </select>
+
+                <label for="spd_arc_position">Arc injection position:</label>
+                <select id="spd_arc_position" class="text_pole">
+                    <option value="2">Before Main Prompt / Story String</option>
+                    <option value="0">After Main Prompt / Story String</option>
+                    <option value="1">In-Chat @ Depth</option>
+                </select>
+                <label for="spd_arc_depth">Arc depth (if In-Chat):</label>
+                <input id="spd_arc_depth" type="number" min="0" max="999" step="1" class="text_pole" />
+
+                <label for="spd_dir_role">Inject direction as role:</label>
+                <select id="spd_dir_role" class="text_pole">
+                    <option value="0">System</option>
+                    <option value="1">User</option>
+                    <option value="2">Assistant</option>
+                </select>
+
+                <label for="spd_dir_position">Direction injection position:</label>
+                <select id="spd_dir_position" class="text_pole">
+                    <option value="2">Before Main Prompt / Story String</option>
+                    <option value="0">After Main Prompt / Story String</option>
+                    <option value="1">In-Chat @ Depth</option>
+                </select>
+                <label for="spd_dir_depth">Direction depth (if In-Chat):</label>
+                <input id="spd_dir_depth" type="number" min="0" max="999" step="1" class="text_pole" />
+
+                <label for="spd_arc_template" title="Template wrapping the arc text before injection. Use {{arc}} placeholder.">Arc injection template:</label>
+                <textarea id="spd_arc_template" class="text_pole textarea_compact" rows="3"></textarea>
+
+                <label for="spd_dir_template" title="Template wrapping the scene directions before injection. Use {{directions}} placeholder.">Direction injection template:</label>
+                <textarea id="spd_dir_template" class="text_pole textarea_compact" rows="3"></textarea>
+
+                <label for="spd_prompt_template" class="title_restorable">
+                    <span>Agent Prompt Template</span>
+                    <div id="spd_restore_prompt" title="Restore the default Narrative Architect prompt" class="right_menu_button">
+                        <div class="fa-solid fa-clock-rotate-left"></div>
+                    </div>
+                </label>
+                <textarea id="spd_prompt_template" class="text_pole textarea_compact" rows="16"
+                    placeholder="Prompt template sent to the agent. JSON schema is enforced after this."></textarea>
+            </div>
+        </div>
+    </div>
+</div>
