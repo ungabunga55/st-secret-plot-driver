@@ -120,6 +120,7 @@ const defaultSettings = {
     log_debug: false,
     run_interval: 1,                    // Run every N user messages (1 = every turn)
     context_size: 10,                   // How many recent messages to send to the agent
+    max_message_chars: 0,               // Per-message char cap (0 = no truncation, send full messages)
     response_length: 2048,              // Max tokens for agent JSON response
     prompt_template: DEFAULT_PROMPT_TEMPLATE,
     arc_template: DEFAULT_ARC_TEMPLATE,
@@ -320,10 +321,14 @@ function buildHistoryMessages(pendingUserText = '') {
     const n = Math.max(1, Number(settings.context_size) || 10);
     const recent = chat.slice(-n).filter(m => m && !m.is_system && m.mes);
 
+    // Per-message char cap. 0 = no truncation (send the full message).
+    const cap = Math.max(0, Number(settings.max_message_chars) || 0);
+    const trim = (s) => (cap > 0 && s.length > cap) ? s.slice(0, cap) : s;
+
     const messages = [];
     for (const m of recent) {
         const role = m.is_user ? 'user' : 'assistant';
-        const content = stripTags(m.mes).slice(0, 2000);
+        const content = trim(stripTags(m.mes));
         if (!content) continue;
         // Merge consecutive same-role messages (API requirement on some providers)
         const last = messages[messages.length - 1];
@@ -348,7 +353,7 @@ function buildHistoryMessages(pendingUserText = '') {
         || (!lastIsUser ? String($('#send_textarea').val() ?? '').trim() : '');
 
     if (pending && !lastIsUser) {
-        const content = stripTags(pending).slice(0, 2000);
+        const content = trim(stripTags(pending));
         const last = messages[messages.length - 1];
         if (last && last.role === 'user') {
             last.content = last.content + '\n\n' + content;
@@ -676,6 +681,7 @@ function loadSettings() {
     $('#spd_log_debug').prop('checked', !!settings.log_debug);
     $('#spd_run_interval').val(settings.run_interval);
     $('#spd_context_size').val(settings.context_size);
+    $('#spd_max_message_chars').val(settings.max_message_chars);
     $('#spd_response_length').val(settings.response_length);
     $('#spd_prompt_template').val(settings.prompt_template);
     $('#spd_arc_template').val(settings.arc_template);
@@ -734,6 +740,7 @@ function setupListeners() {
     $('#spd_log_debug').off('input').on('input', onBool('log_debug'));
     $('#spd_run_interval').off('input').on('input', onNum('run_interval'));
     $('#spd_context_size').off('input').on('input', onNum('context_size'));
+    $('#spd_max_message_chars').off('input').on('input', onNum('max_message_chars'));
     $('#spd_response_length').off('input').on('input', onNum('response_length'));
     $('#spd_arc_role').off('change').on('change', onNum('arc_role'));
     $('#spd_arc_position').off('change').on('change', onNum('arc_position'));
