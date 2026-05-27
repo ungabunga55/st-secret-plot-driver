@@ -20,6 +20,10 @@
     margin-bottom: 6px;
 }
 
+#spd_settings .menu_button {
+    min-height: 32px;
+}
+
 #spd_settings label {
     display: flex;
     align-items: center;
@@ -33,6 +37,51 @@
     max-width: 260px;
 }
 
+#spd_settings .spd_status_card {
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-top: 10px;
+    margin-bottom: 8px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 35%, transparent);
+}
+
+#spd_settings .spd_status_label {
+    font-size: 0.75em;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    opacity: 0.78;
+    margin-bottom: 3px;
+    text-transform: uppercase;
+}
+
+#spd_settings .spd_status_text {
+    font-size: 0.9em;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+#spd_settings .spd_status_text[data-level="success"] {
+    color: var(--SmartThemeQuoteColor);
+}
+
+#spd_settings .spd_status_text[data-level="warning"] {
+    color: #d6a33a;
+}
+
+#spd_settings .spd_status_text[data-level="error"] {
+    color: #d65f5f;
+}
+
+#spd_settings .spd_status_text[data-level="running"] {
+    color: var(--SmartThemeEmColor);
+}
+
+#spd_force_new_arc.active {
+    outline: 1px solid var(--SmartThemeQuoteColor);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--SmartThemeQuoteColor) 45%, transparent) inset;
+}
+
 #spd_advanced_block {
     border-left: 2px solid var(--SmartThemeBorderColor);
     padding-left: 10px;
@@ -42,4 +91,30 @@
 #spd_current_arc,
 #spd_current_directions {
     opacity: 0.9;
+}
+
+@media screen and (max-width: 600px) {
+    #spd_settings .flex-container {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    #spd_settings .menu_button {
+        width: 100%;
+        justify-content: center;
+        min-height: 40px;
+    }
+
+    #spd_settings label:not(.checkbox_label) {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    #spd_settings select.text_pole,
+    #spd_settings input[type="number"].text_pole {
+        width: 100%;
+        max-width: none;
+    }
 }
