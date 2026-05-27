@@ -29,9 +29,9 @@
                     <input id="spd_show_toast" type="checkbox" />
                     <span>Show toast while agent runs</span>
                 </label>
-                <label class="checkbox_label" for="spd_log_debug" title="Log full prompt and raw response to the browser console.">
+                <label class="checkbox_label" for="spd_log_debug" title="Log truncated prompt and raw response previews to the browser console.">
                     <input id="spd_log_debug" type="checkbox" />
-                    <span>Debug logging (prompt &amp; response to console)</span>
+                    <span>Debug logging (truncated prompt &amp; response to console)</span>
                 </label>
             </div>
 
@@ -45,10 +45,19 @@
             <textarea id="spd_current_directions" class="text_pole textarea_compact" rows="3"
                 placeholder="No active direction yet." readonly></textarea>
 
+            <div class="spd_status_card">
+                <div class="spd_status_label">Run Status</div>
+                <div id="spd_status" class="spd_status_text" data-level="idle">Idle. Waiting for the next user turn.</div>
+            </div>
+
             <div class="flex-container">
                 <div id="spd_reset_arc" class="menu_button menu_button_icon" title="Clear the stored arc/directions for this chat and force a fresh one next turn.">
                     <i class="fa-solid fa-trash"></i>
                     <span>Reset plot state (this chat)</span>
+                </div>
+                <div id="spd_force_new_arc" class="menu_button menu_button_icon" role="button" aria-pressed="false" title="Keep current state, but ask the next successful agent run to replace the long-term arc.">
+                    <i class="fa-solid fa-route"></i>
+                    <span>Force new arc next run</span>
                 </div>
                 <div id="spd_run_now" class="menu_button menu_button_icon" title="Trigger the Secret Plot Driver agent right now without sending a message.">
                     <i class="fa-solid fa-play"></i>
@@ -73,6 +82,12 @@
                 <label for="spd_context_size" title="How many recent chat messages the agent sees. Higher = better plot awareness, more tokens.">
                     <span>Chat context size (last N messages)</span>
                     <input id="spd_context_size" type="number" min="1" max="100" step="1" class="text_pole widthUnset" />
+                </label>
+
+                <label for="spd_max_message_chars" title="Optional per-message character cap before sending history to the agent. 0 = no truncation.">
+                    <span>Per-message char cap</span>
+                    <input id="spd_max_message_chars" type="number" min="0" max="100000" step="100" class="text_pole widthUnset" />
+                    <span>chars (0 = full)</span>
                 </label>
 
                 <label for="spd_response_length" title="Max tokens for the agent's JSON response (needs to fit the full JSON structure).">
