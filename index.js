@@ -35,6 +35,9 @@ const ARC_KEY = 'spd_arc';          // setExtensionPrompt key for the arc
 const DIR_KEY = 'spd_directions';   // setExtensionPrompt key for the directions
 const META_KEY = 'secret_plot_driver'; // chat_metadata key for persisted state
 const RECENT_FULFILLED_MAX = 10;
+const VALID_PACING = new Set(['slow', 'exploration', 'building', 'climactic', 'cooldown']);
+const JSON_REPAIR_LOG_LIMIT = 1200;
+const DEBUG_TEXT_LIMIT = 3000;
 
 // ──────────────────────────────────────────────
 // Default "Narrative Architect" prompt — defines the agent role, the
@@ -139,7 +142,31 @@ const defaultSettings = {
 
 let settings;   // populated on load
 let isRunning = false;   // re-entrancy guard
-let lastRunMessageCount = -1; // last chat.length we ran at
+
+function clampInteger(value, min, max, fallback) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+function clampEnumNumber(value, allowed, fallback) {
+    const parsed = Number(value);
+    return allowed.includes(parsed) ? parsed : fallback;
+}
+
+function normalizeSettings() {
+    if (!settings) return;
+    settings.run_interval = clampInteger(settings.run_interval, 1, 50, defaultSettings.run_interval);
+    settings.context_size = clampInteger(settings.context_size, 1, 100, defaultSettings.context_size);
+    settings.max_message_chars = clampInteger(settings.max_message_chars, 0, 100000, defaultSettings.max_message_chars);
+    settings.response_length = clampInteger(settings.response_length, 256, 8192, defaultSettings.response_length);
+    settings.arc_depth = clampInteger(settings.arc_depth, 0, 999, defaultSettings.arc_depth);
+    settings.dir_depth = clampInteger(settings.dir_depth, 0, 999, defaultSettings.dir_depth);
+    settings.arc_role = clampEnumNumber(settings.arc_role, [0, 1, 2], defaultSettings.arc_role);
+    settings.dir_role = clampEnumNumber(settings.dir_role, [0, 1, 2], defaultSettings.dir_role);
+    settings.arc_position = clampEnumNumber(settings.arc_position, [0, 1, 2], defaultSettings.arc_position);
+    settings.dir_position = clampEnumNumber(settings.dir_position, [0, 1, 2], defaultSettings.dir_position);
+}
 
 // ──────────────────────────────────────────────
 // Per-chat state: stored in chat_metadata[META_KEY].
@@ -150,7 +177,10 @@ let lastRunMessageCount = -1; // last chat.length we ran at
 //     pacing: "slow"|"exploration"|"building"|"climactic"|"cooldown",
 //     recentlyFulfilled: string[],                            // rolling window (last 10)
 //     staleDetected: boolean,
-//     lastRunAt: number                                       // chat.length when last run
+//     lastRunAt: number,                                      // legacy chat.length marker
+//     lastRunUserMessageCount: number,                         // committed + pending user turns when last run
+//     forceNewArc: boolean,
+//     lastStatus: { level, text, at }
 //   }
 // ──────────────────────────────────────────────
 
@@ -166,6 +196,38 @@ async function setState(patch) {
     Object.assign(state, patch);
     chat_metadata[META_KEY] = state;
     await saveMetadata();
+}
+
+function updateRunStatus(level, text, { persist = false } = {}) {
+    const state = getState();
+    state.lastStatus = {
+        level,
+        text,
+        at: Date.now(),
+    };
+    updateDisplayedState();
+    if (persist) {
+        chat_metadata[META_KEY] = state;
+        saveMetadata();
+    }
+}
+
+function formatStatus(status) {
+    if (!status || typeof status !== 'object' || !status.text) {
+        return 'Idle. Waiting for the next user turn.';
+    }
+    const at = Number(status.at);
+    const suffix = Number.isFinite(at) ? ` (${new Date(at).toLocaleTimeString()})` : '';
+    return `${status.text}${suffix}`;
+}
+
+function getCommittedUserMessageCount() {
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    return chat.filter(m => m && m.is_user && !m.is_system && m.mes).length;
+}
+
+function getTurnCountForPending(pendingUserText = '') {
+    return getCommittedUserMessageCount() + (String(pendingUserText ?? '').trim() ? 1 : 0);
 }
 
 async function clearState() {
@@ -255,6 +317,16 @@ function updateDisplayedState() {
         : [];
     const pacingLine = state.pacing ? `[pacing: ${state.pacing}${state.staleDetected ? ' · stale' : ''}]\n` : '';
     $('#spd_current_directions').val(pacingLine + active.map(d => `• ${d.direction}`).join('\n'));
+
+    const statusLevel = state.lastStatus?.level || 'idle';
+    $('#spd_status')
+        .text(formatStatus(state.lastStatus))
+        .attr('data-level', statusLevel);
+
+    const forceNewArc = !!state.forceNewArc;
+    $('#spd_force_new_arc')
+        .toggleClass('active', forceNewArc)
+        .attr('aria-pressed', String(forceNewArc));
 }
 
 // ──────────────────────────────────────────────
@@ -278,19 +350,144 @@ function extractJson(text) {
         if (blob) body = blob[1];
     }
 
-    // Repair common LLM JSON mistakes
-    body = body
-        .replace(/\/\/[^\n]*/g, '')          // single-line comments
-        .replace(/\/\*[\s\S]*?\*\//g, '')    // multi-line comments
-        .replace(/,\s*([\]\}])/g, '$1')      // trailing commas
-        .replace(/\.\.\.[^"\n]*/g, '');      // ellipsis continuations
-
     try {
         return JSON.parse(body);
+    } catch (_) {
+        // Continue into repair path.
+    }
+
+    const repaired = repairJson(body);
+    try {
+        return JSON.parse(repaired);
     } catch (err) {
-        console.warn('[SPD] Failed to parse agent JSON:', err, body);
+        console.warn('[SPD] Failed to parse agent JSON:', err, repaired.slice(0, JSON_REPAIR_LOG_LIMIT));
         return null;
     }
+}
+
+/** Fix common LLM JSON mistakes without touching content inside JSON strings. */
+function repairJson(str) {
+    return stripJsonRepairTokens(str).replace(/,\s*([\]\}])/g, '$1');
+}
+
+function stripJsonRepairTokens(str) {
+    let repaired = '';
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < str.length; index += 1) {
+        const char = str[index] || '';
+        const next = str[index + 1];
+        const nextThree = str.slice(index, index + 3);
+
+        if (inString) {
+            repaired += char;
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            repaired += char;
+            continue;
+        }
+
+        if (char === '/' && next === '/') {
+            while (index + 1 < str.length && str[index + 1] !== '\n') index += 1;
+            continue;
+        }
+
+        if (char === '/' && next === '*') {
+            index += 2;
+            while (index + 1 < str.length && !(str[index] === '*' && str[index + 1] === '/')) index += 1;
+            index += 1;
+            continue;
+        }
+
+        if (nextThree === '...') {
+            index += 2;
+            continue;
+        }
+
+        repaired += char;
+    }
+
+    return repaired;
+}
+
+function normalizeAgentResult(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return { data: null, warnings: ['Agent response was not a JSON object.'] };
+    }
+
+    const data = {};
+    const warnings = [];
+
+    if (Object.prototype.hasOwnProperty.call(raw, 'overarchingArc')) {
+        const arc = raw.overarchingArc;
+        if (arc && typeof arc === 'object' && !Array.isArray(arc)) {
+            const description = typeof arc.description === 'string' ? arc.description.trim() : '';
+            const protagonistArc = typeof arc.protagonistArc === 'string' ? arc.protagonistArc.trim() : '';
+            if (description || protagonistArc) {
+                data.overarchingArc = {
+                    description,
+                    protagonistArc,
+                    completed: arc.completed === true,
+                };
+            } else {
+                warnings.push('Ignored overarchingArc because it had no description or protagonistArc.');
+            }
+        } else if (arc == null) {
+            warnings.push('Ignored null overarchingArc; keeping previous arc.');
+        } else {
+            warnings.push('Ignored invalid overarchingArc; keeping previous arc.');
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(raw, 'sceneDirections')) {
+        if (Array.isArray(raw.sceneDirections)) {
+            data.sceneDirections = raw.sceneDirections
+                .filter(d => d && typeof d === 'object')
+                .map(d => ({
+                    direction: typeof d.direction === 'string' ? d.direction.trim() : '',
+                    fulfilled: d.fulfilled === true,
+                }))
+                .filter(d => d.direction);
+        } else {
+            warnings.push('Ignored invalid sceneDirections; keeping previous directions.');
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(raw, 'pacing')) {
+        const pacing = typeof raw.pacing === 'string' ? raw.pacing.trim().toLowerCase() : '';
+        if (VALID_PACING.has(pacing)) {
+            data.pacing = pacing;
+        } else {
+            warnings.push('Ignored invalid pacing value.');
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(raw, 'staleDetected')) {
+        if (typeof raw.staleDetected === 'boolean') {
+            data.staleDetected = raw.staleDetected;
+        } else if (typeof raw.staleDetected === 'string' && /^(true|false)$/i.test(raw.staleDetected.trim())) {
+            data.staleDetected = raw.staleDetected.trim().toLowerCase() === 'true';
+        } else {
+            warnings.push('Ignored invalid staleDetected value.');
+        }
+    }
+
+    if (Object.keys(data).length === 0) {
+        return { data: null, warnings: warnings.length ? warnings : ['Agent response contained no usable plot fields.'] };
+    }
+
+    return { data, warnings };
 }
 
 /** Strip HTML/XML tags from message content to save tokens. */
@@ -299,6 +496,12 @@ function stripTags(text) {
         .replace(/<\/?[a-zA-Z][^>]*>/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
+}
+
+function formatDebugText(text, limit = DEBUG_TEXT_LIMIT) {
+    const value = String(text ?? '');
+    if (value.length <= limit) return value;
+    return `${value.slice(0, limit)}\n\n[SPD debug truncated ${value.length - limit} chars; disable debug or temporarily raise DEBUG_TEXT_LIMIT in code for full prompt inspection.]`;
 }
 
 /**
@@ -387,11 +590,17 @@ function buildAgentTaskMessage() {
         stateSnapshot.recentlyFulfilled = state.recentlyFulfilled;
     }
     if (state.staleDetected != null) stateSnapshot.staleDetected = !!state.staleDetected;
+    if (state.forceNewArc) stateSnapshot.forceNewArc = true;
 
     if (Object.keys(stateSnapshot).length > 0) {
         parts.push('<secret_plot_state>');
         parts.push(JSON.stringify(stateSnapshot, null, 2));
         parts.push('</secret_plot_state>');
+        parts.push('');
+    }
+
+    if (state.forceNewArc) {
+        parts.push('The user has requested a fresh overarching arc. Create a NEW long-term arc now, but keep continuity with the established conversation. Do not wipe character relationships or recent events.');
         parts.push('');
     }
 
@@ -462,10 +671,17 @@ function buildAgentMessages(pendingUserText = '') {
 async function runAgent({ force = false, pendingUserText = '' } = {}) {
     if (isRunning) {
         console.log('[SPD] Already running — skipping re-entry');
+        updateRunStatus('info', 'Skipped because the plot agent is already running.');
         return null;
     }
-    if (!settings.is_enabled && !force) return null;
-    if (settings.is_paused && !force) return null;
+    if (!settings.is_enabled && !force) {
+        updateRunStatus('info', 'Skipped because Secret Plot Driver is disabled.');
+        return null;
+    }
+    if (settings.is_paused && !force) {
+        updateRunStatus('info', 'Paused. Reusing the current arc and direction.');
+        return null;
+    }
 
     // If no pendingUserText was threaded in, try to read it from the
     // textarea now as a last-resort fallback (covers /spd-style manual
@@ -479,12 +695,14 @@ async function runAgent({ force = false, pendingUserText = '' } = {}) {
     const context = getContext();
     const hasChatContent = Array.isArray(context.chat) && context.chat.length > 0;
     if (!hasChatContent && !effectivePending && !force) {
+        updateRunStatus('info', 'Skipped because there is no chat content yet.');
         return null;
     }
 
     isRunning = true;
     let toast = null;
     try {
+        updateRunStatus('running', 'Composing plot threads...');
         if (settings.show_toast) {
             toast = toastr.info('Composing plot threads...', 'Secret Plot Driver', {
                 timeOut: 0, extendedTimeOut: 0,
@@ -499,7 +717,7 @@ async function runAgent({ force = false, pendingUserText = '' } = {}) {
         if (settings.log_debug) {
             console.log('[SPD] ── Agent message array ──');
             for (const m of messages) {
-                console.log(`[SPD] [${m.role}]`, m.content);
+                console.log(`[SPD] [${m.role}]`, formatDebugText(m.content));
             }
         }
 
@@ -507,17 +725,18 @@ async function runAgent({ force = false, pendingUserText = '' } = {}) {
             prompt: messages,
             systemPrompt: '',             // no extra system prompt — our primer is in messages[0]
             instructOverride: true,       // don't apply ST's instruct formatting (we control roles)
-            responseLength: Number(settings.response_length) || 2048,
+            responseLength: settings.response_length,
             trimNames: false,
         });
 
         if (settings.log_debug) {
-            console.log('[SPD] ── Agent raw response ──\n' + raw);
+            console.log('[SPD] ── Agent raw response ──\n' + formatDebugText(raw));
         }
 
         const parsed = extractJson(raw);
         if (!parsed || typeof parsed !== 'object') {
             console.warn('[SPD] Agent returned no parseable JSON. Keeping previous state.');
+            updateRunStatus('warning', 'Agent returned no valid JSON; kept previous plot state.', { persist: true });
             if (toast) toastr.clear(toast);
             if (settings.show_toast) {
                 toastr.warning('Agent returned no valid JSON — keeping previous plot state.', 'Secret Plot Driver', { timeOut: 3500 });
@@ -525,16 +744,32 @@ async function runAgent({ force = false, pendingUserText = '' } = {}) {
             return null;
         }
 
-        await persistAgentResult(parsed);
+        const normalized = normalizeAgentResult(parsed);
+        if (!normalized.data) {
+            console.warn('[SPD] Agent JSON had no usable plot fields. Keeping previous state.', normalized.warnings, parsed);
+            updateRunStatus('warning', 'Agent JSON had no usable plot fields; kept previous plot state.', { persist: true });
+            if (toast) toastr.clear(toast);
+            if (settings.show_toast) {
+                toastr.warning('Agent JSON had no usable plot fields — keeping previous plot state.', 'Secret Plot Driver', { timeOut: 3500 });
+            }
+            return null;
+        }
+
+        await persistAgentResult(normalized.data, {
+            warnings: normalized.warnings,
+            userMessageCount: getTurnCountForPending(effectivePending),
+        });
         applyInjectionsFromState();
 
         if (toast) toastr.clear(toast);
         if (settings.show_toast) {
-            toastr.success('Plot state updated.', 'Secret Plot Driver', { timeOut: 1500 });
+            const warningSuffix = normalized.warnings.length ? ' with minor repairs' : '';
+            toastr.success(`Plot state updated${warningSuffix}.`, 'Secret Plot Driver', { timeOut: 1500 });
         }
-        return parsed;
+        return normalized.data;
     } catch (err) {
         console.error('[SPD] Agent run failed:', err);
+        updateRunStatus('error', `Agent run failed: ${String(err?.message || err)}`, { persist: true });
         if (toast) toastr.clear(toast);
         if (settings.show_toast) {
             toastr.error(String(err?.message || err), 'Secret Plot Driver', { timeOut: 4000 });
@@ -553,18 +788,18 @@ async function runAgent({ force = false, pendingUserText = '' } = {}) {
  *     window so the agent doesn't re-issue them next turn
  *   · pacing / staleDetected are overwritten each run
  */
-async function persistAgentResult(data) {
+async function persistAgentResult(data, { warnings = [], userMessageCount = null } = {}) {
     const state = getState();
     const patch = {};
 
     // Arc — only overwrite if the agent returned a new one
-    if (data.overarchingArc && typeof data.overarchingArc === 'object') {
+    if (Object.prototype.hasOwnProperty.call(data, 'overarchingArc') && data.overarchingArc && typeof data.overarchingArc === 'object') {
         patch.overarchingArc = data.overarchingArc;
     }
 
-    // Scene directions — keep only unfulfilled; track just-fulfilled in rolling window
-    if (Array.isArray(data.sceneDirections)) {
-        const all = data.sceneDirections.filter(d => d && typeof d === 'object' && d.direction);
+    // Scene directions — if omitted, preserve existing directions. Empty array explicitly clears.
+    if (Object.prototype.hasOwnProperty.call(data, 'sceneDirections') && Array.isArray(data.sceneDirections)) {
+        const all = data.sceneDirections;
         const active = all.filter(d => !d.fulfilled);
         const justFulfilled = all.filter(d => d.fulfilled).map(d => d.direction);
 
@@ -574,16 +809,24 @@ async function persistAgentResult(data) {
             const prev = Array.isArray(state.recentlyFulfilled) ? state.recentlyFulfilled : [];
             patch.recentlyFulfilled = [...prev, ...justFulfilled].slice(-RECENT_FULFILLED_MAX);
         }
-    } else {
-        // Agent didn't return directions — clear stale ones
-        patch.sceneDirections = [];
     }
 
-    if (data.pacing && typeof data.pacing === 'string') {
+    if (Object.prototype.hasOwnProperty.call(data, 'pacing') && data.pacing && typeof data.pacing === 'string') {
         patch.pacing = data.pacing;
     }
-    patch.staleDetected = !!data.staleDetected;
+    if (Object.prototype.hasOwnProperty.call(data, 'staleDetected')) {
+        patch.staleDetected = !!data.staleDetected;
+    }
     patch.lastRunAt = getContext().chat?.length ?? 0;
+    patch.lastRunUserMessageCount = Number.isFinite(userMessageCount) ? userMessageCount : getCommittedUserMessageCount();
+    patch.forceNewArc = false;
+    patch.lastStatus = {
+        level: warnings.length ? 'warning' : 'success',
+        text: warnings.length
+            ? `Plot state updated with ${warnings.length} repaired/ignored field(s).`
+            : 'Plot state updated.',
+        at: Date.now(),
+    };
 
     await setState(patch);
 }
@@ -634,22 +877,27 @@ async function onGenerationAfterCommands(type, _options, isDryRun) {
         // On regens/swipes/continues, DON'T re-run — but ensure stored
         // state is re-injected so the arc/directions persist across swipes.
         applyInjectionsFromState();
+        updateRunStatus('info', 'Reused current plot state for regenerate/swipe/continue.');
         return;
     }
     if (settings.is_paused) {
         applyInjectionsFromState();
+        updateRunStatus('info', 'Paused. Reusing the current arc and direction.');
         return;
     }
 
     // Interval gating — only re-run the agent every N user messages
-    const interval = Math.max(1, Number(settings.run_interval) || 1);
+    const interval = settings.run_interval;
     const state = getState();
-    const lastAt = Number(state.lastRunAt ?? -Infinity);
-    const chatLen = getContext().chat?.length ?? 0;
-    const userMsgsSince = Math.max(0, chatLen - lastAt);
+    const currentUserCount = getTurnCountForPending(pendingUserText);
+    const lastUserCount = Number(state.lastRunUserMessageCount);
+    const userMsgsSince = Number.isFinite(lastUserCount)
+        ? Math.max(0, currentUserCount - lastUserCount)
+        : interval;
     if (interval > 1 && userMsgsSince < interval && state.overarchingArc) {
         // Skip this turn — keep using existing injections
         applyInjectionsFromState();
+        updateRunStatus('info', `Skipped by interval (${userMsgsSince}/${interval} user turns since last run).`);
         return;
     }
 
@@ -674,6 +922,7 @@ function loadSettings() {
         }
     }
     settings = extension_settings[extensionName];
+    normalizeSettings();
 
     $('#spd_is_enabled').prop('checked', !!settings.is_enabled);
     $('#spd_is_paused').prop('checked', !!settings.is_paused);
@@ -702,9 +951,11 @@ function onBool(key) {
 }
 function onNum(key) {
     return function () {
-        const v = Number($(this).val());
-        if (!Number.isFinite(v)) return;
-        settings[key] = v;
+        const raw = Number($(this).val());
+        if (!Number.isFinite(raw)) return;
+        settings[key] = raw;
+        normalizeSettings();
+        $(this).val(settings[key]);
         saveSettingsDebounced();
         // Re-apply if injection params changed
         if (key.startsWith('arc_') || key.startsWith('dir_')) applyInjectionsFromState();
@@ -723,6 +974,23 @@ async function onResetArc() {
     clearInjections();
     updateDisplayedState();
     toastr.info('Plot state cleared for this chat.', 'Secret Plot Driver', { timeOut: 2000 });
+}
+
+async function onForceNewArc() {
+    const state = getState();
+    const forceNewArc = !state.forceNewArc;
+    await setState({
+        forceNewArc,
+        lastStatus: {
+            level: forceNewArc ? 'info' : 'idle',
+            text: forceNewArc
+                ? 'Fresh arc requested. The next successful agent run will replace the overarching arc.'
+                : 'Fresh arc request cancelled.',
+            at: Date.now(),
+        },
+    });
+    updateDisplayedState();
+    toastr.info(forceNewArc ? 'Fresh arc requested for the next run.' : 'Fresh arc request cancelled.', 'Secret Plot Driver', { timeOut: 2000 });
 }
 
 async function onRunNow() {
@@ -753,6 +1021,7 @@ function setupListeners() {
     $('#spd_dir_template').off('input').on('input', onText('dir_template'));
 
     $('#spd_reset_arc').off('click').on('click', onResetArc);
+    $('#spd_force_new_arc').off('click').on('click', onForceNewArc);
     $('#spd_run_now').off('click').on('click', onRunNow);
     $('#spd_restore_prompt').off('click').on('click', onRestorePrompt);
     $('#spd_advanced_toggle').off('click').on('click', () =>
